@@ -1,0 +1,200 @@
+---
+title: 'Time Series Forecast: Amazon'
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+```{r}
+#install.packages("pbapply")
+library(quantmod)
+#install.packages("lubridate")
+library(lubridate)
+library(xts)
+library(zoo)
+library(pbapply)
+
+# Define the ticker symbol and download data
+getSymbols("AMZN", from = "2000-01-01", to = Sys.Date())
+
+# Use Ad() to get Adjusted closing prices
+tmp <- Ad(AMZN)
+
+# Print the adjusted prices
+print(tmp)
+```
+
+```{r}
+# Create a variable to store the returns
+rets <- ROC(tmp, type = "discrete")
+rets[is.na(rets)] <-0
+mean(rets)
+sd(rets)
+```
+
+```{r}
+# Create a formula to return the predicted price
+stk_ret = function(STK_PRC, N, MEAN, STDEV)
+{
+  delta_t = 1/N # for 1 period
+  for (i in seq(N))
+  {
+    epsilon <- runif(n=1, min=0, max=1) # random probabilities
+    STK_PRC <- STK_PRC * (1+ qnorm(epsilon, MEAN*delta_t, STDEV*sqrt(delta_t)))
+  }
+  STK_PRC
+}
+
+#latest quote
+last(tmp)
+```
+
+```{r}
+library(lubridate)
+
+#run 1000 simulations
+simulations <- 1000
+
+# number of trading days
+N = 20 #look back 20 days to predict the stock price, this will be our window
+
+STK_PRC <- as.numeric(coredata(tmp[Sys.Date() - days(20)]))
+
+# Get the mean and the standard deviation of the returns
+MEAN = mean(rets)
+STDEV = sd(rets)
+
+#Print the results
+MEAN
+STDEV
+```
+
+
+```{r}
+# Create a vector to store stock prices
+stock_prices <- c()
+for (i in seq(simulations))
+{
+  stock_prices <- c(stock_prices, stk_ret(STK_PRC = STK_PRC, N=N, MEAN=MEAN, STDEV = STDEV))
+}
+
+# Show the predictions
+stock_prices
+```
+
+```{r}
+# Create a summary for the predictions
+quantile(stock_prices)
+```
+#The lowest possible value $157 and highest $192 for today's predictions
+
+```{r}
+# Get the actual values
+last(tmp)
+```
+#Because we use the mean and the standard deviation to predict the stock prices our estimates are off. These numbers do not adjust to market trends so it does not capture the volatility and stock price movements which leads to a higher spread between the predictions and the actual stock price. The standard deviation will maintain the prices within the same range. 
+
+```{r}
+# Now we are going to calculate the predictions for each month
+
+# we will use options expiration dates
+EXPIRY <- tmp[options.expiry(tmp)]
+EXPIRY #monthly options expiration date along with the prices
+```
+```{r}
+# Now we will try to predict the option expiration price for each date
+EXPIRY <- EXPIRY["2000::"] #EVERYTHING AFTER THE YEAR 2000
+IDX <- index(EXPIRY)
+NEXT.EXPIRY <- as.Date("2024-02-22")
+IDX <- c(IDX, NEXT.EXPIRY)
+```
+
+```{r}
+# Calculate the mean and stdev for the option prices
+MEAN = function(calculateUNTIL) #calculate the mean until a certain date
+{
+  tmp <- tmp[paste0("::", calculateUNTIL)]
+  tmp <- ROC(tmp, type = "discrete")
+  tmp[is.na(tmp)]<-0 # if there are any NA's set those to 0
+  mean(tmp)
+}
+
+STDEV = function(calculateUNTIL) #calculate the mean until a certain date
+{
+  tmp <- tmp[paste0("::", calculateUNTIL)]
+  tmp <- ROC(tmp, type = "discrete")
+  tmp[is.na(tmp)]<-0 # if there are any NA's set those to 0
+  sd(tmp)
+}
+```
+
+```{r}
+means <- do.call(rbind, lapply(as.list(IDX), MEAN))
+
+stdevs <- do.call(rbind, lapply(as.list(IDX), STDEV))
+
+#CALCULATE THE DIFFERENCE BETWEEN THE DATES OF THE OPTIONS EXPIRATION DATES
+days = as.numeric(diff(IDX))
+```
+
+```{r}
+#Now we will write the Monte Carlo function
+MONTE.CARLO = function(sim, iter, LastIter)
+{
+  simulations <- sim
+  N <- days[iter]
+  STK_PRC <- as.numeric(EXPIRY[iter])
+  MEAN <- means[iter]
+  STDEV <- stdevs[iter]
+  stock_prices <- c()
+  
+  for(i in seq(simulations))
+  {
+    stock_prices <- c(stock_prices, stk_ret(STK_PRC = STK_PRC, N=N, MEAN=MEAN, STDEV = STDEV))
+  }
+  
+  START <- as.data.frame(round(STK_PRC, 2))
+  START.DATE = index(EXPIRY[iter])
+  PROBS = as.data.frame(t(round(quantile(stock_prices, probs = seq(0,1,0.05)), 2)))
+  
+  if(iter == LastIter) #if this is the last iteration
+  {
+    END <- as.data.frame(NA)
+    END.DATE = as.data.frame(NA)
+  }else{
+    END <- as.data.frame(as.numeric(round(EXPIRY[iter+1], 2)))
+    END.DATE = index(EXPIRY[iter+1])
+  }
+  all <- cbind(START, START.DATE, PROBS, END, END.DATE)
+  
+  #rename columns
+  colnames(all) <- c("START.PRC", "START.DATE", "0%", "5%", "10%", "15%",
+                     "20%", "25%", "30%", "35%", "40%", "45%", "50%", "55%",
+                     "60%", "65%", "70%", "75%", "80%", "85%", "90%", "95%",
+                     "100%", "END.PRC", "END.DATE")
+  all
+
+}
+
+p <- pblapply(as.list(1:length(days)), function(x){
+  MONTE.CARLO(sim=10000,iter = x, LastIter = length(days))
+})
+
+p <- do.call(rbind, p)
+
+plot(p$END.PRC, type = "l")
+lines(p$`0%`, col = "red")
+lines(p$`100%`, col = "green")
+```
+
+```{r}
+#Number of months
+nMo <- nrow(p) #defined by the number of rows
+
+# Number of times it closes above 100% threshold
+sum(as.numeric(na.omit(ifelse(p$END.PRC > p$`100%`,1, 0))))/nMo
+
+#Number of times it closes below 0%
+sum(as.numeric(na.omit(ifelse(p$END.PRC > p$`0%`,1, 0))))/nMo
+```
